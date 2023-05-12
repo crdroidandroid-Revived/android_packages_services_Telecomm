@@ -49,6 +49,7 @@ import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.AtomicFile;
 import android.util.Base64;
+import android.util.EventLog;
 import android.util.Xml;
 
 // TODO: Needed for move to system service: import com.android.internal.R;
@@ -141,6 +142,7 @@ public class PhoneAccountRegistrar {
     public static final String FILE_NAME = "phone-account-registrar-state.xml";
     @VisibleForTesting
     public static final int EXPECTED_STATE_VERSION = 9;
+    public static final int MAX_PHONE_ACCOUNT_REGISTRATIONS = 10;
 
     /** Keep in sync with the same in SipSettings.java */
     private static final String SIP_SHARED_PREFERENCES = "SIP_PREFERENCES";
@@ -741,8 +743,13 @@ public class PhoneAccountRegistrar {
         return account.isSelfManaged();
     }
 
-    // TODO: Should we implement an artificial limit for # of accounts associated with a single
-    // ComponentName?
+    /**
+     * Performs checks before calling addOrReplacePhoneAccount(PhoneAccount)
+     *
+     * @param account The {@code PhoneAccount} to add or replace.
+     * @throws SecurityException if package does not have BIND_TELECOM_CONNECTION_SERVICE permission
+     * @throws IllegalArgumentException if MAX_PHONE_ACCOUNT_REGISTRATIONS are reached
+     */
     public void registerPhoneAccount(PhoneAccount account) {
         // Enforce the requirement that a connection service for a phone account has the correct
         // permission.
@@ -752,6 +759,19 @@ public class PhoneAccountRegistrar {
                     account.getAccountHandle());
             throw new SecurityException("PhoneAccount connection service requires "
                     + "BIND_TELECOM_CONNECTION_SERVICE permission.");
+        }
+        //Enforce an upper bound on the number of PhoneAccount's a package can register.
+        // Most apps should only require 1-2.
+        if (getPhoneAccountsForPackage(
+                account.getAccountHandle().getComponentName().getPackageName(),
+                account.getAccountHandle().getUserHandle()).size()
+                >= MAX_PHONE_ACCOUNT_REGISTRATIONS) {
+            Log.w(this, "Phone account %s reached max registration limit for package",
+                    account.getAccountHandle());
+            throw new IllegalArgumentException(
+                    "Error, cannot register phone account " + account.getAccountHandle()
+                            + " because the limit, " + MAX_PHONE_ACCOUNT_REGISTRATIONS
+                            + ", has been reached");
         }
 
         addOrReplacePhoneAccount(account);
@@ -774,6 +794,7 @@ public class PhoneAccountRegistrar {
 
         PhoneAccount oldAccount = getPhoneAccountUnchecked(account.getAccountHandle());
         if (oldAccount != null) {
+            enforceSelfManagedAccountUnmodified(account, oldAccount);
             mState.accounts.remove(oldAccount);
             isEnabled = oldAccount.isEnabled();
             Log.i(this, "Modify account: %s", getAccountDiffString(account, oldAccount));
@@ -831,6 +852,19 @@ public class PhoneAccountRegistrar {
                 fireAccountsChanged();
                 fireAccountUnRegistered(accountHandle);
             }
+        }
+    }
+
+    private void enforceSelfManagedAccountUnmodified(PhoneAccount newAccount,
+            PhoneAccount oldAccount) {
+        if (oldAccount.hasCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED) &&
+                (!newAccount.hasCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED))) {
+            EventLog.writeEvent(0x534e4554, "246930197");
+            Log.w(this, "Self-managed phone account %s replaced by a non self-managed one",
+                    newAccount.getAccountHandle());
+            throw new IllegalArgumentException("Error, cannot change a self-managed "
+                    + "phone account " + newAccount.getAccountHandle()
+                    + " to other kinds of phone account");
         }
     }
 
